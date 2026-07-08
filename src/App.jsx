@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Clock, LogIn, LogOut, Settings, ChevronDown, ChevronUp, X, TrendingUp, TrendingDown } from "lucide-react";
+import { Clock, LogIn, LogOut, Settings, ChevronDown, ChevronUp, X, TrendingUp, TrendingDown, Plus, Trash2, Pencil, Check, Zap } from "lucide-react";
 
 const WEEKLY_TARGET_MS = 30 * 60 * 60 * 1000; // 30 horas semanais
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -66,6 +66,22 @@ async function apiAddRecord(entry) {
   const data = await res.json();
   return data.records || [];
 }
+async function apiGetAutomations() {
+  const res = await fetch("/api/automations");
+  if (!res.ok) throw new Error("falha");
+  const data = await res.json();
+  return data.items || [];
+}
+async function apiSaveAutomations(items) {
+  const res = await fetch("/api/automations", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) throw new Error("falha");
+  const data = await res.json();
+  return data.items || [];
+}
 
 export default function App() {
   const [now, setNow] = useState(new Date());
@@ -77,6 +93,11 @@ export default function App() {
   const [openPanel, setOpenPanel] = useState({});
   const [error, setError] = useState("");
   const [busyIdx, setBusyIdx] = useState(null);
+  const [automations, setAutomations] = useState([]);
+  const [newAutomation, setNewAutomation] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editingText, setEditingText] = useState("");
+  const [autoBusy, setAutoBusy] = useState(false);
   const tickRef = useRef(null);
 
   useEffect(() => {
@@ -95,6 +116,11 @@ export default function App() {
       setRecords(await apiGetRecords());
     } catch {
       setRecords([]);
+    }
+    try {
+      setAutomations(await apiGetAutomations());
+    } catch {
+      setAutomations([]);
     }
     setLoaded(true);
   }, []);
@@ -201,6 +227,57 @@ export default function App() {
     }
 
     return { weekWorked, weekBalance, bank, weeks, todayWorked };
+  }
+
+  async function persistAutomations(next) {
+    setAutoBusy(true);
+    setError("");
+    try {
+      const saved = await apiSaveAutomations(next);
+      setAutomations(saved);
+    } catch {
+      setError("Não consegui salvar a lista de automações. Tenta de novo.");
+    } finally {
+      setAutoBusy(false);
+    }
+  }
+
+  function addAutomation(e) {
+    e.preventDefault();
+    const text = newAutomation.trim();
+    if (!text) return;
+    const item = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, text, done: false, createdAt: Date.now() };
+    setNewAutomation("");
+    persistAutomations([item, ...automations]);
+  }
+
+  function toggleAutomation(id) {
+    const next = automations.map((a) => (a.id === id ? { ...a, done: !a.done } : a));
+    persistAutomations(next);
+  }
+
+  function deleteAutomation(id) {
+    persistAutomations(automations.filter((a) => a.id !== id));
+  }
+
+  function startEditAutomation(item) {
+    setEditingId(item.id);
+    setEditingText(item.text);
+  }
+
+  function cancelEditAutomation() {
+    setEditingId(null);
+    setEditingText("");
+  }
+
+  function commitEditAutomation(e) {
+    e.preventDefault();
+    const text = editingText.trim();
+    if (!text) return;
+    const next = automations.map((a) => (a.id === editingId ? { ...a, text } : a));
+    setEditingId(null);
+    setEditingText("");
+    persistAutomations(next);
   }
 
   function togglePanel(person, panel) {
@@ -357,6 +434,70 @@ export default function App() {
         })}
       </div>
 
+      <div className="automationsPanel" style={styles.automationsCard}>
+        <div style={styles.automationsHeader}>
+          <Zap size={16} color="#FFB020" />
+          <span style={styles.setupEyebrow}>AUTOMAÇÕES</span>
+        </div>
+
+        <form onSubmit={addAutomation} style={styles.automationForm}>
+          <input
+            value={newAutomation}
+            onChange={(e) => setNewAutomation(e.target.value)}
+            placeholder="Nova automação…"
+            style={styles.automationInput}
+            maxLength={140}
+          />
+          <button type="submit" style={styles.automationAddBtn} disabled={autoBusy} aria-label="Adicionar automação">
+            <Plus size={16} />
+          </button>
+        </form>
+
+        <div style={styles.automationList}>
+          {automations.length === 0 && <div style={styles.historyEmpty}>Nenhuma automação cadastrada.</div>}
+          {automations.map((item) => (
+            <div key={item.id} style={styles.automationRow}>
+              <button
+                onClick={() => toggleAutomation(item.id)}
+                aria-label={item.done ? "Marcar como ativa" : "Marcar como pausada"}
+                style={{ ...styles.checkbox, background: item.done ? "#2DD4BF" : "transparent", borderColor: item.done ? "#2DD4BF" : "#5C6478" }}
+              >
+                {item.done && <Check size={12} color="#14171F" strokeWidth={3} />}
+              </button>
+
+              {editingId === item.id ? (
+                <form onSubmit={commitEditAutomation} style={{ flex: 1, display: "flex", gap: 6 }}>
+                  <input
+                    autoFocus
+                    value={editingText}
+                    onChange={(e) => setEditingText(e.target.value)}
+                    onBlur={commitEditAutomation}
+                    style={{ ...styles.automationInput, flex: 1, padding: "6px 8px" }}
+                    maxLength={140}
+                  />
+                </form>
+              ) : (
+                <span
+                  style={{ ...styles.automationText, textDecoration: item.done ? "line-through" : "none", color: item.done ? "#5C6478" : "#E8E6DF" }}
+                  onClick={() => startEditAutomation(item)}
+                >
+                  {item.text}
+                </span>
+              )}
+
+              {editingId !== item.id && (
+                <button onClick={() => startEditAutomation(item)} style={styles.automationIconBtn} aria-label="Editar">
+                  <Pencil size={13} color="#5C6478" />
+                </button>
+              )}
+              <button onClick={() => deleteAutomation(item.id)} style={styles.automationIconBtn} aria-label="Excluir">
+                <Trash2 size={13} color="#5C6478" />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <p style={styles.footnote}>
         Saldo semanal compara as horas trabalhadas na semana (seg–dom) com a meta de 30h. O banco de horas acumulado soma isso desde o primeiro registro de cada pessoa. Dados visíveis para toda a equipe.
       </p>
@@ -391,6 +532,17 @@ function GlobalStyle() {
       input:focus, button:focus-visible { outline: 2px solid #FFB020; outline-offset: 2px; }
       @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
       @keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+      @media (min-width: 1180px) {
+        .automationsPanel {
+          position: fixed !important;
+          top: 140px !important;
+          right: 32px !important;
+          width: 300px !important;
+          max-height: calc(100vh - 180px) !important;
+          margin-top: 0 !important;
+          overflow-y: auto;
+        }
+      }
     `}</style>
   );
 }
@@ -431,6 +583,16 @@ const styles = {
   historyRow: { display: "flex", alignItems: "center", fontFamily: "'Space Mono', monospace", fontSize: 12 },
   historyEmpty: { color: "#5C6478", fontSize: 12, fontStyle: "italic" },
   footnote: { color: "#4B5266", fontSize: 12, marginTop: 24, textAlign: "center", lineHeight: 1.6, maxWidth: 460 },
+  automationsCard: { width: "100%", maxWidth: 460, background: "#1B1F2A", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: 18, marginTop: 20 },
+  automationsHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 },
+  automationForm: { display: "flex", gap: 8, marginBottom: 12 },
+  automationInput: { flex: 1, background: "#14171F", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, padding: "10px 12px", color: "#F3F1EA", fontSize: 13, fontFamily: "'Inter', sans-serif" },
+  automationAddBtn: { background: "rgba(255,176,32,0.12)", border: "1px solid #FFB020", borderRadius: 8, width: 38, color: "#FFB020", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
+  automationList: { display: "flex", flexDirection: "column", gap: 4, maxHeight: 340, overflowY: "auto" },
+  automationRow: { display: "flex", alignItems: "center", gap: 8, padding: "8px 4px", borderBottom: "1px solid rgba(255,255,255,0.05)" },
+  checkbox: { width: 18, height: 18, minWidth: 18, borderRadius: 5, border: "1.5px solid", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: 0 },
+  automationText: { flex: 1, fontSize: 13, cursor: "text", wordBreak: "break-word" },
+  automationIconBtn: { background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex", alignItems: "center" },
   setupCard: { background: "#1B1F2A", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 28, maxWidth: 400, width: "100%", marginTop: 40 },
   setupEyebrow: { fontFamily: "'Space Mono', monospace", fontSize: 11, letterSpacing: "0.14em", color: "#FFB020" },
   setupTitle: { color: "#F3F1EA", fontSize: 22, fontWeight: 700, margin: "10px 0 4px" },
