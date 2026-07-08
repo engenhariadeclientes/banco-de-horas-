@@ -8,9 +8,11 @@ const DATA_FILE = path.join(__dirname, "..", "data", "db.json");
 
 function readDB() {
   try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+    const db = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+    if (!Array.isArray(db.automations)) db.automations = [];
+    return db;
   } catch {
-    return { team: [], records: [] };
+    return { team: [], records: [], automations: [] };
   }
 }
 
@@ -42,6 +44,17 @@ app.post("/api/records", (req, res) => {
   if (req.body.entry) db.records = [...db.records, req.body.entry];
   writeDB(db);
   res.json({ records: db.records });
+});
+
+app.get("/api/automations", (req, res) => {
+  res.json({ items: readDB().automations });
+});
+
+app.put("/api/automations", (req, res) => {
+  const db = readDB();
+  db.automations = Array.isArray(req.body.items) ? req.body.items : [];
+  writeDB(db);
+  res.json({ items: db.automations });
 });
 
 // Serve o front-end já buildado (npm run build gera a pasta dist)
