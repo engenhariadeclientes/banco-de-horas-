@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Clock, LogIn, LogOut, Settings, ChevronDown, ChevronUp, X, TrendingUp, TrendingDown, Plus, Trash2, Pencil, Check, Zap } from "lucide-react";
 
-const WEEKLY_TARGET_MS = 30 * 60 * 60 * 1000; // 30 horas semanais
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 function fmtClock(d) {
@@ -40,15 +39,25 @@ async function apiGetTeam() {
   const data = await res.json();
   return data.names || [];
 }
-async function apiSaveTeam(names) {
+async function apiSaveTeam(names, pins) {
   const res = await fetch("/api/team", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ names }),
+    body: JSON.stringify({ names, pins: pins || {} }),
   });
   if (!res.ok) throw new Error("falha");
   const data = await res.json();
   return data.names || [];
+}
+async function apiVerifyPin(person, pin) {
+  const res = await fetch("/api/verify-pin", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ person, pin }),
+  });
+  if (!res.ok) return false;
+  const data = await res.json();
+  return !!data.ok;
 }
 async function apiGetRecords() {
   const res = await fetch("/api/records");
@@ -65,6 +74,22 @@ async function apiAddRecord(entry) {
   if (!res.ok) throw new Error("falha");
   const data = await res.json();
   return data.records || [];
+}
+async function apiGetSettings() {
+  const res = await fetch("/api/settings");
+  if (!res.ok) throw new Error("falha");
+  const data = await res.json();
+  return data.weeklyTargetHours || 30;
+}
+async function apiSaveSettings(weeklyTargetHours) {
+  const res = await fetch("/api/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ weeklyTargetHours }),
+  });
+  if (!res.ok) throw new Error("falha");
+  const data = await res.json();
+  return data.weeklyTargetHours || 30;
 }
 async function apiGetAutomations() {
   const res = await fetch("/api/automations");
@@ -88,7 +113,10 @@ export default function App() {
   const [team, setTeam] = useState(null);
   const [records, setRecords] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [setupNames, setSetupNames] = useState(["", "", ""]);
+  const [setupNames, setSetupNames] = useState([""]);
+  const [setupPins, setSetupPins] = useState([""]);
+  const [setupTargetHours, setSetupTargetHours] = useState("30");
+  const [weeklyTargetHours, setWeeklyTargetHours] = useState(30);
   const [showSettings, setShowSettings] = useState(false);
   const [openPanel, setOpenPanel] = useState({});
   const [error, setError] = useState("");
@@ -98,6 +126,11 @@ export default function App() {
   const [editingId, setEditingId] = useState(null);
   const [editingText, setEditingText] = useState("");
   const [autoBusy, setAutoBusy] = useState(false);
+  const [pinPromptPerson, setPinPromptPerson] = useState(null);
+  const [pinTargetIdx, setPinTargetIdx] = useState(null);
+  const [pinInput, setPinInput] = useState("");
+  const [pinError, setPinError] = useState("");
+  const [pinBusy, setPinBusy] = useState(false);
   const tickRef = useRef(null);
 
   useEffect(() => {
@@ -118,6 +151,11 @@ export default function App() {
       setRecords([]);
     }
     try {
+      setWeeklyTargetHours(await apiGetSettings());
+    } catch {
+      setWeeklyTargetHours(30);
+    }
+    try {
       setAutomations(await apiGetAutomations());
     } catch {
       setAutomations([]);
@@ -127,25 +165,118 @@ export default function App() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  async function saveTeam(names) {
+  const WEEKLY_TARGET_MS = weeklyTargetHours * 60 * 60 * 1000;
+
+  async function saveTeamAndSettings(names, targetHours, pins) {
     setError("");
     try {
-      const saved = await apiSaveTeam(names);
-      setTeam(saved);
+      const [savedNames, savedHours] = await Promise.all([
+        apiSaveTeam(names, pins),
+        apiSaveSettings(targetHours),
+      ]);
+      setTeam(savedNames);
+      setWeeklyTargetHours(savedHours);
       setShowSettings(false);
     } catch {
-      setError("Não consegui salvar os nomes. Tenta de novo.");
+      setError("Não consegui salvar. Tenta de novo.");
     }
   }
 
   function handleSetupSubmit(e) {
     e.preventDefault();
-    const cleaned = setupNames.map((n) => n.trim()).filter(Boolean);
-    if (cleaned.length < 1) {
-      setError("Preencha ao menos um nome.");
+    const isNewSetup = !team || team.length === 0;
+    const rows = setupNames
+      .map((n, i) => ({ name: n.trim(), pin: (setupPins[i] || "").trim() }))
+      .filter((r) => r.name);
+
+    if (rows.length < 1) {
+      setError("Adicione ao menos uma pessoa.");
       return;
     }
-    saveTeam(cleaned);
+    const hours = parseFloat(String(setupTargetHours).replace(",", "."));
+    if (!hours || hours <= 0) {
+      setError("Informe uma meta semanal válida (em horas).");
+      return;
+    }
+
+    const pinsMap = {};
+    for (const r of rows) {
+      const existedBefore = !isNewSetup && team.includes(r.name);
+      if (r.pin && !/^\d{4}$/.test(r.pin)) {
+        setError(`A senha de "${r.name}" precisa ter exatamente 4 números.`);
+        return;
+      }
+      if (!r.pin && !existedBefore) {
+        setError(`Defina uma senha de 4 dígitos para "${r.name}".`);
+        return;
+      }
+      if (r.pin) pinsMap[r.name] = r.pin;
+    }
+
+    saveTeamAndSettings(rows.map((r) => r.name), hours, pinsMap);
+  }
+
+  function addSetupRow() {
+    setSetupNames([...setupNames, ""]);
+    setSetupPins([...setupPins, ""]);
+  }
+  function removeSetupRow(idx) {
+    setSetupNames(setupNames.filter((_, i) => i !== idx));
+    setSetupPins(setupPins.filter((_, i) => i !== idx));
+  }
+  function updateSetupRow(idx, value) {
+    const next = [...setupNames];
+    next[idx] = value;
+    setSetupNames(next);
+  }
+  function updateSetupPin(idx, value) {
+    const digits = value.replace(/\D/g, "").slice(0, 4);
+    const next = [...setupPins];
+    next[idx] = digits;
+    setSetupPins(next);
+  }
+  function openSettings() {
+    setSetupNames(team.length ? [...team] : [""]);
+    setSetupPins(team.length ? team.map(() => "") : [""]);
+    setSetupTargetHours(String(weeklyTargetHours));
+    setError("");
+    setShowSettings(true);
+  }
+
+  function openPinPrompt(person, idx) {
+    setPinPromptPerson(person);
+    setPinTargetIdx(idx);
+    setPinInput("");
+    setPinError("");
+  }
+  function closePinPrompt() {
+    setPinPromptPerson(null);
+    setPinTargetIdx(null);
+    setPinInput("");
+    setPinError("");
+  }
+  async function confirmPinAndPunch(e) {
+    e.preventDefault();
+    if (!/^\d{4}$/.test(pinInput)) {
+      setPinError("Digite os 4 números da senha.");
+      return;
+    }
+    setPinBusy(true);
+    setPinError("");
+    try {
+      const ok = await apiVerifyPin(pinPromptPerson, pinInput);
+      if (!ok) {
+        setPinError("Senha incorreta.");
+        setPinInput("");
+        setPinBusy(false);
+        return;
+      }
+      await punch(pinPromptPerson, pinTargetIdx);
+      closePinPrompt();
+    } catch {
+      setPinError("Não consegui verificar a senha agora.");
+      setPinBusy(false);
+    }
   }
 
   function lastRecordFor(person) {
@@ -303,11 +434,50 @@ export default function App() {
         <div style={styles.setupCard}>
           <div style={styles.setupEyebrow}>CONFIGURAÇÃO INICIAL</div>
           <h1 style={styles.setupTitle}>Quem vai bater o ponto?</h1>
-          <p style={styles.setupSub}>Cadastre até 3 pessoas. Meta de banco de horas: 30h por semana, por pessoa.</p>
+          <p style={styles.setupSub}>Adicione as pessoas da equipe, uma senha de 4 dígitos para cada uma e a meta semanal de horas.</p>
           <form onSubmit={handleSetupSubmit} style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 24 }}>
-            {[0, 1, 2].map((i) => (
-              <input key={i} value={setupNames[i]} onChange={(e) => { const next = [...setupNames]; next[i] = e.target.value; setSetupNames(next); }} placeholder={`Pessoa ${i + 1}`} style={styles.input} maxLength={40} />
+            {setupNames.map((name, i) => (
+              <div key={i} style={styles.personRow}>
+                <input
+                  value={name}
+                  onChange={(e) => updateSetupRow(i, e.target.value)}
+                  placeholder={`Pessoa ${i + 1}`}
+                  style={{ ...styles.input, flex: 1 }}
+                  maxLength={40}
+                />
+                <input
+                  value={setupPins[i] || ""}
+                  onChange={(e) => updateSetupPin(i, e.target.value)}
+                  placeholder="Senha"
+                  inputMode="numeric"
+                  type="password"
+                  maxLength={4}
+                  style={{ ...styles.input, ...styles.pinField }}
+                />
+                {setupNames.length > 1 && (
+                  <button type="button" onClick={() => removeSetupRow(i)} style={styles.automationIconBtn} aria-label="Remover pessoa">
+                    <Trash2 size={16} color="#5C6478" />
+                  </button>
+                )}
+              </div>
             ))}
+            <button type="button" onClick={addSetupRow} style={styles.addPersonBtn}>
+              <Plus size={14} /> Adicionar pessoa
+            </button>
+
+            <div style={styles.targetRow}>
+              <label style={styles.targetLabel} htmlFor="target-hours">Meta semanal (horas)</label>
+              <input
+                id="target-hours"
+                type="number"
+                min="1"
+                step="0.5"
+                value={setupTargetHours}
+                onChange={(e) => setSetupTargetHours(e.target.value)}
+                style={{ ...styles.input, width: 90, textAlign: "center" }}
+              />
+            </div>
+
             {error && <div style={styles.errorText}>{error}</div>}
             <button type="submit" style={styles.primaryBtn}>Começar</button>
           </form>
@@ -322,10 +492,10 @@ export default function App() {
 
       <header style={styles.header}>
         <div>
-          <div style={styles.eyebrow}>BANCO DE HORAS · META 30H/SEMANA</div>
+          <div style={styles.eyebrow}>BANCO DE HORAS · META {weeklyTargetHours}H/SEMANA</div>
           <div style={styles.dateLine}>{fmtDateLong(now)}</div>
         </div>
-        <button aria-label="Configurações" onClick={() => { setSetupNames([team[0] || "", team[1] || "", team[2] || ""]); setShowSettings(true); }} style={styles.iconBtn}>
+        <button aria-label="Configurações" onClick={openSettings} style={styles.iconBtn}>
           <Settings size={18} color="#8A93A8" />
         </button>
       </header>
@@ -367,7 +537,7 @@ export default function App() {
                 {last ? `Último registro: ${last.type === "in" ? "entrada" : "saída"} às ${fmtTime(new Date(last.timestamp))}` : "Nenhum registro ainda"}
               </div>
 
-              <button onClick={() => punch(person, idx)} disabled={busyIdx === idx} style={{ ...styles.punchBtn, background: isIn ? "rgba(124,141,181,0.12)" : "rgba(255,176,32,0.12)", borderColor: isIn ? "#7C8DB5" : "#FFB020", color: isIn ? "#B8C2D9" : "#FFB020", opacity: busyIdx === idx ? 0.6 : 1 }}>
+              <button onClick={() => openPinPrompt(person, idx)} disabled={busyIdx === idx} style={{ ...styles.punchBtn, background: isIn ? "rgba(124,141,181,0.12)" : "rgba(255,176,32,0.12)", borderColor: isIn ? "#7C8DB5" : "#FFB020", color: isIn ? "#B8C2D9" : "#FFB020", opacity: busyIdx === idx ? 0.6 : 1 }}>
                 {isIn ? <LogOut size={16} /> : <LogIn size={16} />}
                 {busyIdx === idx ? "Registrando…" : isIn ? "Bater saída" : "Bater entrada"}
               </button>
@@ -375,7 +545,7 @@ export default function App() {
               <div style={styles.bankSection}>
                 <div style={styles.bankRow}>
                   <span style={styles.bankLabel}>Semana atual</span>
-                  <span style={styles.bankMono}>{msToHM(weekWorked)} / 30h</span>
+                  <span style={styles.bankMono}>{msToHM(weekWorked)} / {weeklyTargetHours}h</span>
                 </div>
                 <div style={styles.progressTrack}>
                   <div style={{ ...styles.progressFill, width: `${pct}%`, background: weekBalance >= 0 ? "#2DD4BF" : "#FFB020" }} />
@@ -499,7 +669,7 @@ export default function App() {
       </div>
 
       <p style={styles.footnote}>
-        Saldo semanal compara as horas trabalhadas na semana (seg–dom) com a meta de 30h. O banco de horas acumulado soma isso desde o primeiro registro de cada pessoa. Dados visíveis para toda a equipe.
+        Saldo semanal compara as horas trabalhadas na semana (seg–dom) com a meta de {weeklyTargetHours}h. O banco de horas acumulado soma isso desde o primeiro registro de cada pessoa. Dados visíveis para toda a equipe.
       </p>
 
       {showSettings && (
@@ -510,11 +680,78 @@ export default function App() {
               <button onClick={() => setShowSettings(false)} style={styles.iconBtn} aria-label="Fechar"><X size={16} color="#8A93A8" /></button>
             </div>
             <form onSubmit={handleSetupSubmit} style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 16 }}>
-              {[0, 1, 2].map((i) => (
-                <input key={i} value={setupNames[i]} onChange={(e) => { const next = [...setupNames]; next[i] = e.target.value; setSetupNames(next); }} placeholder={`Pessoa ${i + 1}`} style={styles.input} maxLength={40} />
+              <p style={styles.pinHint}>Deixe a senha em branco para manter a atual. Preencha só para definir uma nova.</p>
+              {setupNames.map((name, i) => (
+                <div key={i} style={styles.personRow}>
+                  <input
+                    value={name}
+                    onChange={(e) => updateSetupRow(i, e.target.value)}
+                    placeholder={`Pessoa ${i + 1}`}
+                    style={{ ...styles.input, flex: 1 }}
+                    maxLength={40}
+                  />
+                  <input
+                    value={setupPins[i] || ""}
+                    onChange={(e) => updateSetupPin(i, e.target.value)}
+                    placeholder="Senha"
+                    inputMode="numeric"
+                    type="password"
+                    maxLength={4}
+                    style={{ ...styles.input, ...styles.pinField }}
+                  />
+                  {setupNames.length > 1 && (
+                    <button type="button" onClick={() => removeSetupRow(i)} style={styles.automationIconBtn} aria-label="Remover pessoa">
+                      <Trash2 size={16} color="#5C6478" />
+                    </button>
+                  )}
+                </div>
               ))}
+              <button type="button" onClick={addSetupRow} style={styles.addPersonBtn}>
+                <Plus size={14} /> Adicionar pessoa
+              </button>
+
+              <div style={styles.targetRow}>
+                <label style={styles.targetLabel} htmlFor="target-hours-edit">Meta semanal (horas)</label>
+                <input
+                  id="target-hours-edit"
+                  type="number"
+                  min="1"
+                  step="0.5"
+                  value={setupTargetHours}
+                  onChange={(e) => setSetupTargetHours(e.target.value)}
+                  style={{ ...styles.input, width: 90, textAlign: "center" }}
+                />
+              </div>
+
               {error && <div style={styles.errorText}>{error}</div>}
               <button type="submit" style={styles.primaryBtn}>Salvar</button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {pinPromptPerson && (
+        <div style={styles.modalOverlay} onClick={closePinPrompt}>
+          <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <span style={styles.setupEyebrow}>SENHA DE {pinPromptPerson.toUpperCase()}</span>
+              <button onClick={closePinPrompt} style={styles.iconBtn} aria-label="Fechar"><X size={16} color="#8A93A8" /></button>
+            </div>
+            <form onSubmit={confirmPinAndPunch} style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 16, alignItems: "center" }}>
+              <input
+                autoFocus
+                type="password"
+                inputMode="numeric"
+                maxLength={4}
+                value={pinInput}
+                onChange={(e) => setPinInput(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                style={styles.pinInputBig}
+                placeholder="••••"
+              />
+              {pinError && <div style={styles.errorText}>{pinError}</div>}
+              <button type="submit" style={{ ...styles.primaryBtn, width: "100%" }} disabled={pinBusy}>
+                {pinBusy ? "Verificando…" : "Confirmar"}
+              </button>
             </form>
           </div>
         </div>
@@ -603,4 +840,11 @@ const styles = {
   modalOverlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 10 },
   modalCard: { background: "#1B1F2A", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, padding: 24, maxWidth: 380, width: "100%" },
   modalHeader: { display: "flex", justifyContent: "space-between", alignItems: "center" },
+  personRow: { display: "flex", gap: 8 },
+  pinField: { width: 78, textAlign: "center", letterSpacing: "0.2em" },
+  addPersonBtn: { display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "none", border: "1px dashed rgba(255,255,255,0.2)", borderRadius: 8, padding: "10px 14px", color: "#8A93A8", fontSize: 13, cursor: "pointer" },
+  targetRow: { display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 4, paddingTop: 12, borderTop: "1px solid rgba(255,255,255,0.06)" },
+  targetLabel: { fontSize: 13, color: "#8A93A8" },
+  pinHint: { fontSize: 12, color: "#5C6478", margin: "0 0 4px", lineHeight: 1.5 },
+  pinInputBig: { width: "100%", textAlign: "center", fontSize: 30, letterSpacing: "0.6em", fontFamily: "'Space Mono', monospace", background: "#14171F", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, padding: "14px 14px 14px 22px", color: "#F3F1EA" },
 };
